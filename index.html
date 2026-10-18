@@ -1,0 +1,547 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Шайба</title>
+<meta name="description" content="3D-шайба с вашим логотипом: влетает в экран, отскакивает, и её можно покрутить.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://puck.likemiens.com/">
+<meta property="og:title" content="Шайба">
+<meta property="og:description" content="Влетает в экран, отскакивает, и её можно покрутить.">
+<meta property="og:image" content="https://puck.likemiens.com/og.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><ellipse cx='16' cy='20' rx='13' ry='7' fill='%23111'/><rect x='3' y='13' width='26' height='7' fill='%23111'/><ellipse cx='16' cy='13' rx='13' ry='7' fill='%23444'/></svg>">
+<style>
+  :root { color-scheme: light }
+  html, body { height: 100%; margin: 0 }
+  body {
+    overflow: hidden;
+    background: radial-gradient(120% 95% at 50% 40%, #fdfdfd 0%, #eceef1 48%, #d6dade 100%);
+    font: 500 14px/1 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-tap-highlight-color: transparent;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: grab; outline: none }
+  canvas.drag { cursor: grabbing }
+  canvas:focus-visible { outline: 2px solid #2b2e33; outline-offset: -6px }
+  .dock {
+    position: fixed; left: 50%; bottom: max(20px, env(safe-area-inset-bottom)); display: flex; gap: 6px; padding: 6px;
+    border-radius: 999px; background: rgb(255 255 255 / .7); box-shadow: 0 6px 24px rgb(20 22 25 / .08);
+    -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+    opacity: 0; transform: translate(-50%, 8px); pointer-events: none; transition: opacity .5s, transform .5s;
+  }
+  .dock.on { opacity: 1; transform: translate(-50%, 0); pointer-events: auto }
+  .dock button {
+    flex: none; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 50%; display: grid; place-items: center;
+    background: #16181b; color: #2b2e33; cursor: pointer; transition: transform .15s, box-shadow .15s;
+  }
+  .dock button:hover { transform: scale(1.07) }
+  .dock button[aria-pressed="true"] { box-shadow: 0 0 0 2px #fff, 0 0 0 4px #16181b }
+  .dock button:focus-visible { outline: 2px solid #2b2e33; outline-offset: 3px }
+  .dock img { width: 28px; height: 28px; object-fit: contain }
+  .dock .again { background: rgb(20 22 25 / .07) }
+  .dock .again svg { width: 20px; height: 20px }
+  @media (max-width: 380px) { .dock { gap: 4px; padding: 5px } .dock button { width: 40px; height: 40px } }
+  .drop {
+    position: fixed; inset: 14px; display: grid; place-items: center; pointer-events: none;
+    border: 2px dashed rgb(20 22 25 / .3); border-radius: 24px; background: rgb(255 255 255 / .3);
+    opacity: 0; transition: opacity .2s;
+  }
+  .drop.on { opacity: 1 }
+  .drop span, .note {
+    padding: 11px 18px; border-radius: 999px; background: rgb(255 255 255 / .92); color: #2b2e33;
+    box-shadow: 0 6px 24px rgb(20 22 25 / .08); line-height: 1.35;
+  }
+  .note {
+    position: fixed; left: 50%; top: max(24px, env(safe-area-inset-top)); margin: 0;
+    max-width: calc(100% - 32px); box-sizing: border-box; text-align: center;
+    opacity: 0; transform: translate(-50%, -6px); pointer-events: none; transition: opacity .3s, transform .3s;
+  }
+  .note.on { opacity: 1; transform: translate(-50%, 0) }
+</style>
+<script type="importmap">{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.module.js" } }</script>
+</head>
+<body>
+<canvas tabindex="0" role="img" aria-label="Хоккейная шайба с логотипом. Потяните или нажмите стрелки, чтобы покрутить."></canvas>
+<nav class="dock" aria-label="Логотип на шайбе">
+  <button type="button" class="again" aria-label="Бросить ещё раз" title="Бросить ещё раз"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg></button>
+</nav>
+<div class="drop" aria-hidden="true"><span>Отпустите — логотип появится на шайбе</span></div>
+<p class="note" role="status" aria-live="polite"></p>
+<script type="module">
+import * as THREE from 'three'
+
+
+const R = 1, H = 2 / 3, F = 0.06    // radius, thickness (a real puck is 3″ × 1″), rounded edge
+const FLIGHT = 0.85                  // s from the shot to the glass
+const FAR = 34                       // how far behind its resting place the shot starts
+const SHARDS = 220, FLAKES = 900     // ice chips and snow dust knocked off at the glass
+const calm = matchMedia('(prefers-reduced-motion: reduce)').matches
+
+const sstep = (a, b, x) => { x = Math.min(1, Math.max(0, (x - a) / (b - a))); return x * x * (3 - 2 * x) }
+const mix = (a, b, t) => a + (b - a) * t
+const sheet = (w, h = w) => Object.assign(document.createElement('canvas'), { width: w, height: h })
+const ctx = c => c.getContext('2d', { willReadFrequently: true })
+
+const canvas = document.querySelector('canvas'), dock = document.querySelector('.dock'), again = document.querySelector('.again')
+const dropZone = document.querySelector('.drop'), notice = document.querySelector('.note')
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true })
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
+renderer.toneMapping = THREE.ACESFilmicToneMapping
+const aniso = renderer.capabilities.getMaxAnisotropy()
+const texture = (c, srgb, wrap) => {
+  const t = new THREE.CanvasTexture(c)
+  if (srgb) t.colorSpace = THREE.SRGBColorSpace
+  if (wrap) t.wrapS = THREE.RepeatWrapping
+  t.anisotropy = aniso
+  return t
+}
+
+// a face: satin rubber with the logo in slightly raised ink → colour, roughness and normal maps.
+// `draw(g, size)` paints the ink: its colour in RGB, where it lies in alpha
+function bakeFace(size, draw) {
+  const n = size * size
+  const ink = sheet(size), g = ctx(ink)
+  draw(g, size)
+  const soft = sheet(size), sg = ctx(soft)
+  sg.filter = `blur(${size / 500}px)`; sg.drawImage(ink, 0, 0)
+  const pixels = c => ctx(c).getImageData(0, 0, size, size).data
+  const noise = cell => {              // smooth value noise, `cell` px per sample
+    const m = Math.ceil(size / cell), small = sheet(m), img = new ImageData(m, m)
+    for (let i = 0; i < img.data.length; i++) img.data[i] = i % 4 == 3 ? 255 : Math.random() * 255
+    ctx(small).putImageData(img, 0, 0)
+    const c = sheet(size), cg = ctx(c)
+    cg.imageSmoothingQuality = 'high'; cg.drawImage(small, 0, 0, size, size)
+    return pixels(c)
+  }
+  const paint = pixels(ink), bevel = pixels(soft), fine = noise(2), coarse = noise(size / 24)
+  const col = new ImageData(size, size), rough = new ImageData(size, size), nrm = new ImageData(size, size), h = new Float32Array(n)
+  for (let i = 0, j = 0; i < n; i++, j += 4) {
+    const k = paint[j + 3] / 255, f = fine[j] / 255, c = coarse[j] / 255
+    const rubber = 13 + 3 * c, wear = (222 + 22 * f - 12 * c) / 255   // ink is a little uneven
+    for (let ch = 0; ch < 3; ch++) col.data[j + ch] = mix(rubber, paint[j + ch] * wear, k)
+    col.data[j + 3] = 255
+    rough.data[j + 1] = 255 * mix(0.46 + 0.03 * (c - 0.5) + 0.06 * (f - 0.5), 0.34, k); rough.data[j + 3] = 255
+    h[i] = bevel[j + 3] / 255 + 0.035 * f
+  }
+  const K = 1.8 * size / 1024
+  for (let y = 0, i = 0; y < size; y++) for (let x = 0; x < size; x++, i++) {
+    const dx = (h[x < size - 1 ? i + 1 : i] - h[x ? i - 1 : i]) * K
+    const dy = (h[y < size - 1 ? i + size : i] - h[y ? i - size : i]) * K
+    const l = 127.5 / Math.sqrt(dx * dx + dy * dy + 1), j = i * 4
+    nrm.data[j] = 127.5 - dx * l; nrm.data[j + 1] = 127.5 + dy * l; nrm.data[j + 2] = 127.5 + l; nrm.data[j + 3] = 255
+  }
+  return [col, rough, nrm].map((img, i) => { const c = sheet(size); ctx(c).putImageData(img, 0, 0); return texture(c, !i) })
+}
+
+// logos offered at the bottom and by name in ?logo=: the Cubas favicon first (the default), then meme emoji
+const PRESETS = [
+  ['cubas', 'Cubas', 'presets/cubas.webp'],
+  ['moai', 'Моаи', 'presets/moai.svg'],
+  ['skull', 'Череп', 'presets/skull.svg'],
+  ['clown', 'Клоун', 'presets/clown.svg'],
+  ['nerd', 'Ботаник', 'presets/nerd.svg'],
+  ['sob', 'Слёзы', 'presets/sob.svg'],
+]
+
+// a logo prepared by inkFrom: wide ones go across the face, square and tall ones smaller
+const placed = art => (g, size) => {
+  const A = art.width / art.height, w = Math.min(0.76 * size * A / Math.hypot(A, 1), 0.72 * size, 0.6 * size * A)
+  g.imageSmoothingQuality = 'high'
+  g.drawImage(art, (size - w) / 2, (size - w / A) / 2, w, w / A)
+}
+
+// a logo in any colours → ink for the puck, cropped to what prints. Coloured parts keep their colour; grey parts
+// turn to white ink where they are the logo and to bare rubber where they are its background: the light corners
+// of an opaque picture, or the light details inside a dark logo on a transparent one. A cut-out picture that is
+// mostly colour (a photo, a full-colour drawing) prints as it is, dark greys included.
+// ponytail: one grey rule per image, so a logo mixing a black wordmark with white-filled shapes loses one of them
+function inkFrom(img) {
+  const k = 1600 / Math.max(img.naturalWidth, img.naturalHeight)
+  const w = Math.max(1, Math.round(img.naturalWidth * k)), h = Math.max(1, Math.round(img.naturalHeight * k))
+  const c = sheet(w, h), g = ctx(c)
+  g.drawImage(img, 0, 0, w, h)
+  const d = g.getImageData(0, 0, w, h), p = d.data
+  const lum = i => (0.2126 * p[i] + 0.7152 * p[i + 1] + 0.0722 * p[i + 2]) / 255
+  const colour = i => sstep(0.12, 0.3, (Math.max(p[i], p[i + 1], p[i + 2]) - Math.min(p[i], p[i + 1], p[i + 2])) / 255)
+  const corners = [0, (w - 1) * 4, (w * h - w) * 4, (w * h - 1) * 4]
+  let invert, picture = false                    // invert: dark greys are the ink, light ones the background
+  if (corners.every(i => p[i + 3] > 250)) invert = corners.reduce((s, i) => s + lum(i), 0) / 4 > 0.5
+  else {
+    let sum = 0, weight = 0, coloured = 0, total = 0
+    for (let i = 0; i < p.length; i += 4) {
+      const a = p[i + 3], s = colour(i), q = a * (1 - s)
+      sum += q * lum(i); weight += q; coloured += a * s; total += a
+    }
+    invert = weight > 0 && sum / weight < 0.5
+    picture = coloured > 0.5 * total
+  }
+  let x0 = w, y0 = h, x1 = -1, y1 = -1
+  for (let y = 0, i = 0; y < h; y++) for (let x = 0; x < w; x++, i += 4) {
+    const s = picture ? 1 : colour(i), grey = invert ? 1 - lum(i) : lum(i), cover = p[i + 3] * mix(grey, 1, s)
+    for (let ch = 0; ch < 3; ch++) p[i + ch] = mix(255, p[i + ch], s)
+    p[i + 3] = cover
+    if (cover > 10) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y) }
+  }
+  if (x1 < 0) throw new Error('nothing to print')
+  g.putImageData(d, 0, 0)
+  const art = sheet(x1 - x0 + 1, y1 - y0 + 1)
+  ctx(art).drawImage(c, x0, y0, art.width, art.height, 0, 0, art.width, art.height)
+  return art
+}
+
+// a dropped file or a download → ink. SVGs get a large explicit size first, so they rasterise sharply
+// even when they only carry a viewBox
+async function decode(blob) {
+  if (blob.type == 'image/svg+xml' || /<svg[\s>]/i.test(await blob.slice(0, 1024).text())) {
+    const svg = new DOMParser().parseFromString(await blob.text(), 'image/svg+xml').documentElement
+    if (svg.localName != 'svg') throw new Error('broken svg')
+    const box = svg.getAttribute('viewBox')?.trim().split(/[\s,]+/).map(Number)
+    let [w, h] = box?.length == 4 ? box.slice(2) : [parseFloat(svg.getAttribute('width')), parseFloat(svg.getAttribute('height'))]
+    if (!(w > 0 && h > 0)) w = h = 1000
+    if (box?.length != 4) svg.setAttribute('viewBox', `0 0 ${w} ${h}`)
+    svg.setAttribute('width', 2048 * w / Math.max(w, h)); svg.setAttribute('height', 2048 * h / Math.max(w, h))
+    blob = new Blob([new XMLSerializer().serializeToString(svg)], { type: 'image/svg+xml' })
+  }
+  const url = URL.createObjectURL(blob), img = new Image()
+  img.src = url
+  try { await img.decode(); return inkFrom(img) } finally { URL.revokeObjectURL(url) }
+}
+
+// ?logo=<preset name or address>: a preset from our own folder; an address straight from there when the site
+// allows it (CORS), otherwise through the wsrv.nl image proxy, which also turns SVG into PNG.
+// ponytail: sites without CORS depend on wsrv.nl; an /api proxy of our own if that ever lets us down
+async function fetchLogo(src) {
+  const preset = PRESETS.find(p => p[0] == src)
+  const url = new URL(preset ? preset[2] : src, location.href).href, signal = AbortSignal.timeout(6000)   // a broken link must not hold the shot long
+  const get = async u => {
+    const r = await fetch(u, { signal })
+    if (!r.ok) throw new Error(r.status)
+    return decode(await r.blob())
+  }
+  if (preset) return get(url)
+  try { return await get(url) }
+  catch { return get(`https://wsrv.nl/?url=${encodeURIComponent(url)}&w=1600&h=1600&fit=inside&output=png`) }
+}
+
+// the side: moulded diamond grip between two smooth lips; u runs around, v from bottom to top
+function bakeRim(w, hgt) {
+  const N = 120, rows = H * N / (2 * Math.PI * R), DEPTH = 0.012   // diamonds around, rows that keep them square, groove depth
+  const tri = x => 1 - 2 * Math.abs(x - Math.floor(x) - 0.5)
+  const n = w * hgt, h = new Float32Array(n), band = new Float32Array(hgt)
+  for (let y = 0, i = 0; y < hgt; y++) {
+    const v = 1 - (y + 0.5) / hgt
+    band[y] = sstep(0.12, 0.15, v) * sstep(0.12, 0.15, 1 - v)
+    for (let x = 0; x < w; x++, i++) {
+      const u = (x + 0.5) / w
+      h[i] = 1 - band[y] * (1 - Math.min(1, 1.6 * Math.min(tri(u * N + v * rows), tri(u * N - v * rows))))
+    }
+  }
+  const col = new ImageData(w, hgt), rough = new ImageData(w, hgt), nrm = new ImageData(w, hgt)
+  const Kx = DEPTH * w / (4 * Math.PI * R), Ky = DEPTH * hgt / (2 * H)
+  for (let y = 0, i = 0; y < hgt; y++) for (let x = 0; x < w; x++, i++) {
+    const dx = (h[y * w + (x + 1) % w] - h[y * w + (x + w - 1) % w]) * Kx
+    const dy = (h[y < hgt - 1 ? i + w : i] - h[y ? i - w : i]) * Ky
+    const l = 127.5 / Math.sqrt(dx * dx + dy * dy + 1), j = i * 4
+    nrm.data[j] = 127.5 - dx * l; nrm.data[j + 1] = 127.5 + dy * l; nrm.data[j + 2] = 127.5 + l; nrm.data[j + 3] = 255
+    col.data[j] = col.data[j + 1] = col.data[j + 2] = 8 + 14 * h[i]; col.data[j + 3] = 255
+    rough.data[j + 1] = 255 * mix(0.34, mix(0.8, 0.45, h[i]), band[y]); rough.data[j + 3] = 255   // glossier smooth lips
+  }
+  return [col, rough, nrm].map((img, i) => { const c = sheet(w, hgt); ctx(c).putImageData(img, 0, 0); return texture(c, !i, true) })
+}
+
+// where the edge hit the glass: a broken ring of snow, thicker in some places than others
+function bakeFrost(size) {
+  const c = sheet(size), g = ctx(c), m = size / 2, r = m * R / (1.35 * R)
+  g.fillStyle = '#fff'
+  for (let i = 0; i < 2600; i++) {
+    const a = Math.random() * Math.PI * 2, thick = 0.5 + 0.5 * Math.sin(3 * a + 1.3) * Math.sin(5 * a)
+    if (Math.random() > 0.25 + 0.75 * thick) continue
+    const d = r * (0.97 + (Math.random() - 0.4) * 0.16 * (0.4 + thick) + (Math.random() < 0.08 ? 0.25 * Math.random() : 0))
+    g.globalAlpha = 0.15 + 0.55 * Math.random()
+    g.beginPath(); g.arc(m + Math.cos(a) * d, m + Math.sin(a) * d, 0.5 + 2.6 * Math.random() ** 2, 0, 7); g.fill()
+  }
+  return texture(c, true)
+}
+
+function bakeFlake() {
+  const c = sheet(64), g = ctx(c), grad = g.createRadialGradient(32, 32, 0, 32, 32, 32)
+  grad.addColorStop(0, '#fff'); grad.addColorStop(0.4, 'rgba(255,255,255,.9)')
+  grad.addColorStop(0.72, 'rgba(188,199,212,.4)'); grad.addColorStop(1, 'rgba(188,199,212,0)')
+  g.fillStyle = grad; g.fillRect(0, 0, 64, 64)
+  return texture(c, true)
+}
+
+// a bright studio for reflections: the puck is black, so its shape is drawn by what it mirrors
+function studio() {
+  const room = new THREE.Scene()
+  room.background = new THREE.Color(0.24, 0.25, 0.27)
+  const card = (w, h, x, y, z, k) => {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ color: new THREE.Color().setScalar(k), side: THREE.DoubleSide }))
+    m.position.set(x, y, z); m.lookAt(0, 0, 0); room.add(m)
+  }
+  card(12, 8, 0, 10, 6, 3.2)   // large softbox overhead, in front
+  card(6, 6, -6.6, 7.7, -6.6, 3)   // up, left and behind: the resting face catches its edge as a sheen
+  card(3, 14, -9, 2, 5, 5)     // tall strip on the left: the bright line down the grip
+  card(3, 14, 9, 1, 2, 1.5)    // dimmer strip on the right
+  card(16, 5, 0, -7, 8, 1.2)   // bounce off the ice, below and in front
+  card(6, 6, 0, 3, 12, 1)      // behind the camera, so a face turned to us still has a sheen
+  const pmrem = new THREE.PMREMGenerator(renderer), env = pmrem.fromScene(room, 0.03).texture
+  pmrem.dispose()
+  return env
+}
+
+const scene = new THREE.Scene()
+scene.environment = studio()
+const camera = new THREE.PerspectiveCamera(30, 1, 0.05, 200)
+const key = new THREE.DirectionalLight('#fff', 1.4)
+key.position.set(-3, 6, 5)
+scene.add(key)
+
+// the puck: two printed faces and a lathed wall with rounded edges
+const FACE_SIZE = Math.min(innerWidth, innerHeight) * devicePixelRatio > 900 ? 2048 : 1024
+const face = new THREE.MeshStandardMaterial()
+function print(draw) {                           // bake a face for this ink; both sides share it
+  const [map, roughnessMap, normalMap] = bakeFace(FACE_SIZE, draw)
+  for (const t of [face.map, face.roughnessMap, face.normalMap]) t?.dispose()
+  Object.assign(face, { map, roughnessMap, normalMap }).needsUpdate = true
+}
+const [rimMap, rimRough, rimNormal] = bakeRim(2048, 256)
+const side = new THREE.MeshStandardMaterial({ map: rimMap, roughnessMap: rimRough, normalMap: rimNormal })
+const disc = new THREE.CircleGeometry(R - F, 192)
+const top = new THREE.Mesh(disc, face), bottom = new THREE.Mesh(disc, face)
+top.rotation.x = -Math.PI / 2; top.position.y = H / 2
+bottom.rotation.x = Math.PI / 2; bottom.position.y = -H / 2
+const profile = []
+for (let i = 0; i <= 8; i++) { const t = (i / 8 - 1) * Math.PI / 2; profile.push(new THREE.Vector2(R - F + F * Math.cos(t), F - H / 2 + F * Math.sin(t))) }
+for (let i = 0; i <= 8; i++) { const t = i / 8 * Math.PI / 2; profile.push(new THREE.Vector2(R - F + F * Math.cos(t), H / 2 - F + F * Math.sin(t))) }
+const wall = new THREE.LatheGeometry(profile, 256), wp = wall.attributes.position, wuv = wall.attributes.uv
+for (let i = 0; i < wp.count; i++) wuv.setY(i, wp.getY(i) / H + 0.5)   // v by height, so the diamonds stay square
+const puck = new THREE.Group()
+puck.add(top, bottom, new THREE.Mesh(wall, side))
+scene.add(puck)
+
+// what flies off at the glass
+const ice = new THREE.InstancedMesh(new THREE.OctahedronGeometry(1, 0),
+  new THREE.MeshStandardMaterial({ color: '#d8e9ff', roughness: 0.03, metalness: 0.25, flatShading: true, transparent: true, opacity: 0.8 }), SHARDS)
+ice.count = 0; ice.frustumCulled = false
+const dust = new THREE.BufferGeometry()
+dust.setAttribute('position', new THREE.BufferAttribute(new Float32Array(FLAKES * 3), 3))
+dust.setAttribute('color', new THREE.BufferAttribute(new Float32Array(FLAKES * 4), 4))
+dust.setDrawRange(0, 0)
+const snow = new THREE.Points(dust, new THREE.PointsMaterial({ size: 0.05, map: bakeFlake(), vertexColors: true, transparent: true, depthWrite: false, toneMapped: false }))
+snow.frustumCulled = false
+const frost = new THREE.Mesh(new THREE.PlaneGeometry(2.7 * R, 2.7 * R), new THREE.MeshBasicMaterial({ map: bakeFrost(512), transparent: true, depthWrite: false, toneMapped: false, opacity: 0 }))
+frost.renderOrder = 2
+scene.add(ice, snow, frost)
+
+const shards = [], flakes = []
+function burst(cx, cy, cz) {
+  shards.length = flakes.length = 0
+  for (let i = 0; i < SHARDS; i++) {
+    const a = Math.random() * Math.PI * 2, r = R * (0.75 + 0.35 * Math.random()), speed = 2 + 7.5 * Math.random() ** 2
+    shards.push({
+      p: new THREE.Vector3(cx + Math.cos(a) * r, cy + Math.sin(a) * r, cz - 0.1 * Math.random()),
+      v: new THREE.Vector3(Math.cos(a) * speed, Math.sin(a) * speed + 1.5 * Math.random(), -0.3 - 2.5 * Math.random()),
+      axis: new THREE.Vector3().randomDirection(), w: 8 + 22 * Math.random(),
+      size: 0.006 + 0.032 * Math.random() ** 3, life: 0.6 + 1.3 * Math.random(), age: 0,
+    })
+  }
+  for (let i = 0; i < FLAKES; i++) {           // dust comes off the edge, so the logo stays clean
+    const a = Math.random() * Math.PI * 2, r = R * (0.9 + 0.25 * Math.random()), speed = 0.6 + 5 * Math.random() ** 1.5
+    flakes.push({
+      p: new THREE.Vector3(cx + Math.cos(a) * r, cy + Math.sin(a) * r, cz - 0.15 * Math.random()),
+      v: new THREE.Vector3(Math.cos(a) * speed, Math.sin(a) * speed + Math.random(), -0.2 - 1.5 * Math.random()),
+      life: 0.7 + 1.6 * Math.random(), age: 0,
+    })
+  }
+}
+
+const m4 = new THREE.Matrix4(), q4 = new THREE.Quaternion(), s3 = new THREE.Vector3()
+function fly(dt) {
+  let live = 0
+  shards.forEach((s, i) => {
+    const k = (s.age += dt) / s.life, size = k < 1 ? s.size * (1 - k ** 3) : 0
+    if (k < 1) live++
+    s.v.y -= 7 * dt; s.v.multiplyScalar(Math.exp(-0.8 * dt)); s.p.addScaledVector(s.v, dt)
+    ice.setMatrixAt(i, m4.compose(s.p, q4.setFromAxisAngle(s.axis, s.w * s.age), s3.set(size, size * 2.2, size * 0.6)))
+  })
+  ice.count = live ? shards.length : 0
+  ice.instanceMatrix.needsUpdate = true
+  const pos = dust.attributes.position, col = dust.attributes.color
+  live = 0
+  flakes.forEach((f, i) => {
+    const alpha = 0.9 * Math.max(0, 1 - (f.age += dt) / f.life) ** 1.5
+    if (alpha > 0) live++
+    f.v.y -= 2.4 * dt; f.v.multiplyScalar(Math.exp(-2.2 * dt)); f.p.addScaledVector(f.v, dt)
+    pos.setXYZ(i, f.p.x, f.p.y, f.p.z); col.setXYZW(i, 1, 1, 1, alpha)
+  })
+  dust.setDrawRange(0, live ? flakes.length : 0)
+  pos.needsUpdate = col.needsUpdate = true
+}
+
+// poses: FACE has the top face on the glass with the logo upright, REST is the three-quarter view it settles in
+const X = new THREE.Vector3(1, 0, 0), Y = new THREE.Vector3(0, 1, 0), ID = new THREE.Quaternion()
+const FACE = new THREE.Quaternion().setFromAxisAngle(X, Math.PI / 2)
+const REST = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.68, -0.3, 0.2, 'YZX'))
+const pos = new THREE.Vector3(), vel = new THREE.Vector3(), base = new THREE.Quaternion(), idle = new THREE.Quaternion(), user = new THREE.Quaternion()
+const spin = new THREE.Vector3(), tmpQ = new THREE.Quaternion(), tmpV = new THREE.Vector3(), euler = new THREE.Euler()
+let t0 = 0, hitAt = null, turn = 0, turnVel = 0, bob = 0, last = 0, drag = null, releasedAt = -Infinity
+
+function hit(z, now) {
+  hitAt = now; pos.set(0, 0, z); vel.set(0, 0.6, -17); turn = 0; turnVel = 1.2
+  frost.position.set(0, 0, z + H / 2 + 0.01)
+  burst(0, 0, z + H / 2)
+}
+
+function frame(ms) {
+  const now = ms / 1000, dt = Math.min(0.05, now - last)
+  last = now
+  const T = Math.tan(camera.fov * Math.PI / 360)
+  const D = Math.max(R / (T * 0.58), R / (T * camera.aspect * 0.8))        // at rest: ~58% of the height, ~80% of a narrow width
+  const near = Math.max(R / (T * 0.9), R / (T * camera.aspect * 1.15))     // at the glass it all but fills the screen
+  camera.position.set(0, 0, D)
+  if (hitAt === null) {
+    const k = Math.max(0, now - t0) / FLIGHT
+    puck.visible = now >= t0
+    if (k >= 1) hit(D - near, now)
+    else {                                       // a straight shot from the lower left, flipping up to face us, spinning to a stop
+      const s = k ** 1.1, d0 = D + FAR
+      pos.set(-0.62 * d0 * T * camera.aspect * (1 - s), -0.42 * d0 * T * (1 - s), mix(-FAR, D - near, s))
+      base.setFromAxisAngle(X, mix(0.32, Math.PI / 2, sstep(0.15, 0.92, k))).multiply(tmpQ.setFromAxisAngle(Y, 6 * Math.PI * (1 - (1 - k) ** 1.7)))
+    }
+  }
+  if (hitAt !== null) {
+    const tau = now - hitAt
+    for (let left = dt; left > 0; left -= 1 / 240) {   // springs: back off the glass, a little past its place, and home
+      const h = Math.min(left, 1 / 240)
+      vel.addScaledVector(pos, -34 * h).addScaledVector(vel, -6.4 * h)
+      pos.addScaledVector(vel, h)
+      turnVel += ((1 - turn) * 30 - turnVel * 4.9) * h
+      turn += turnVel * h
+    }
+    base.slerpQuaternions(FACE, REST, turn)
+    const squash = Math.exp(-tau / 0.05) * Math.cos(tau * 55), shake = 0.06 * Math.exp(-tau / 0.09)
+    puck.scale.set(1 + 0.07 * squash, 1 - 0.18 * squash, 1 + 0.07 * squash)
+    camera.position.x = shake * Math.sin(tau * 120); camera.position.y = shake * Math.sin(tau * 97 + 1)
+    frost.material.opacity = 1 - sstep(0.1, 1, tau)
+    frost.position.y = -0.06 * tau
+    const a = calm ? 0 : sstep(0.9, 2.6, tau)
+    idle.setFromEuler(euler.set(0.06 * Math.sin(now * 0.8) * a, 0.1 * Math.sin(now * 0.5) * a, 0))
+    bob = 0.04 * Math.sin(now * 1.2) * a
+    if (tau > 1.5) dock.classList.add('on')
+    fly(dt)
+  }
+  if (!drag) {                                   // a throw keeps turning, slows, and after a pause the puck eases back
+    rotate(spin.x * dt, spin.y * dt)
+    spin.multiplyScalar(Math.exp(-dt / 0.6))
+    if (now - releasedAt > 1 && spin.lengthSq() < 0.25) user.slerp(ID, 1 - Math.exp(-dt / 0.45))
+  }
+  puck.quaternion.copy(user).multiply(idle).multiply(base)
+  puck.position.copy(pos).y += bob
+  renderer.render(scene, camera)
+}
+
+function rotate(x, y) {                          // about the screen axes: x tips it toward us, y turns it sideways
+  const a = Math.hypot(x, y)
+  if (a > 1e-6) user.premultiply(tmpQ.setFromAxisAngle(tmpV.set(x / a, y / a, 0), a))
+}
+canvas.addEventListener('pointerdown', e => {
+  if (hitAt === null) return
+  drag = { x: e.clientX, y: e.clientY, t: e.timeStamp }
+  spin.set(0, 0, 0)
+  canvas.setPointerCapture(e.pointerId); canvas.classList.add('drag')
+})
+canvas.addEventListener('pointermove', e => {
+  if (!drag) return
+  const k = 2.6 / Math.min(innerWidth, innerHeight), x = (e.clientY - drag.y) * k, y = (e.clientX - drag.x) * k
+  const dt = Math.max(0.008, (e.timeStamp - drag.t) / 1000)
+  rotate(x, y)
+  spin.lerp(tmpV.set(x / dt, y / dt, 0), 0.5).clampLength(0, 25)
+  drag = { x: e.clientX, y: e.clientY, t: e.timeStamp }
+})
+const release = e => {
+  if (!drag) return
+  if (e.timeStamp - drag.t > 80) spin.set(0, 0, 0)   // held still before letting go: no throw
+  drag = null; releasedAt = performance.now() / 1000
+  canvas.classList.remove('drag')
+}
+canvas.addEventListener('pointerup', release)
+canvas.addEventListener('pointercancel', release)
+canvas.addEventListener('keydown', e => {
+  const d = { ArrowLeft: [0, -3], ArrowRight: [0, 3], ArrowUp: [-3, 0], ArrowDown: [3, 0] }[e.key]
+  if (!d || hitAt === null) return
+  e.preventDefault()
+  spin.x += d[0]; spin.y += d[1]; releasedAt = performance.now() / 1000
+})
+
+function throwAgain() {
+  hitAt = null; t0 = performance.now() / 1000 + 0.25
+  user.identity(); idle.identity(); spin.set(0, 0, 0); bob = 0
+  puck.scale.set(1, 1, 1); frost.material.opacity = 0
+  shards.length = flakes.length = 0; ice.count = 0; dust.setDrawRange(0, 0)
+}
+again.addEventListener('click', throwAgain)
+again.hidden = calm                              // no shots when motion is reduced
+
+let noticeTimer = 0
+function note(text) {
+  notice.textContent = text; notice.classList.add('on')
+  clearTimeout(noticeTimer); noticeTimer = setTimeout(() => notice.classList.remove('on'), 4500)
+}
+const press = name => dock.querySelectorAll('[data-logo]').forEach(b => b.setAttribute('aria-pressed', b.dataset.logo == name))
+
+// a preset picked, or a logo dropped anywhere on the page (a file, or an image dragged from another tab):
+// it is printed and the puck thrown again
+async function use(load, name = null) {
+  try {
+    print(placed(await load)); press(name)
+    if (!calm) throwAgain()
+  } catch { note('Не получилось прочитать логотип. Подойдёт SVG или PNG.') }
+}
+for (const [name, title, file] of PRESETS) {     // little pucks in the dock, before the throw button
+  const b = Object.assign(document.createElement('button'), { type: 'button', title })
+  b.dataset.logo = name; b.setAttribute('aria-label', title); b.setAttribute('aria-pressed', 'false')
+  b.append(Object.assign(new Image(), { src: file, alt: '' }))
+  b.addEventListener('click', () => use(fetchLogo(name), name))
+  dock.insertBefore(b, again)
+}
+let dragTimer = 0
+addEventListener('dragover', e => {
+  const types = [...(e.dataTransfer?.types || [])]
+  if (!types.includes('Files') && !types.includes('text/uri-list')) return
+  e.preventDefault(); e.dataTransfer.dropEffect = 'copy'
+  dropZone.classList.add('on'); clearTimeout(dragTimer)
+  dragTimer = setTimeout(() => dropZone.classList.remove('on'), 150)   // dragover repeats while over the page
+})
+addEventListener('drop', e => {
+  e.preventDefault(); dropZone.classList.remove('on')
+  const file = e.dataTransfer.files[0], link = e.dataTransfer.getData('text/uri-list').split(/\r?\n/).find(l => l && l[0] != '#')
+  if (file) use(decode(file))
+  else if (link) use(fetchLogo(link))
+})
+
+const fit = () => {
+  renderer.setSize(innerWidth, innerHeight, false)
+  camera.aspect = innerWidth / innerHeight
+  camera.updateProjectionMatrix()
+}
+addEventListener('resize', fit)
+fit()
+let shown = new URLSearchParams(location.search).get('logo') || 'cubas', art = null   // ?logo=<preset name or address of an SVG or PNG>
+try { art = await fetchLogo(shown) } catch {
+  if (shown != 'cubas') note('Не получилось загрузить логотип по ссылке, показываю Cubas.')
+  shown = 'cubas'; art = await fetchLogo(shown).catch(() => null)   // opened from disk the presets can't load: a bare puck
+}
+print(art ? placed(art) : () => {})
+press(shown)
+await renderer.compileAsync(scene, camera)
+last = performance.now() / 1000
+if (calm) { hitAt = last - 1000; turn = 1 }   // no shot: the puck is simply there
+else t0 = last + 0.35
+renderer.setAnimationLoop(frame)
+</script>
+</body>
+</html>
